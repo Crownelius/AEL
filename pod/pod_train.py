@@ -126,6 +126,23 @@ def setup_paths() -> None:
             sys.path.insert(0, p)
 
 
+def assert_gpu_available() -> None:
+    """Fail fast if no CUDA. Catches notebooks that forgot to enable GPU
+    BEFORE we spend minutes streaming/tokenizing data."""
+    import torch
+    if not torch.cuda.is_available():
+        raise SystemExit(
+            "[pod_train] ABORT: CUDA is not available.\n"
+            "  This script needs a GPU. Likely cause: notebook accelerator set to 'None'.\n"
+            "  On Kaggle: right sidebar -> Settings -> Accelerator -> 'GPU T4 x2' (or P100).\n"
+            "  On RunPod: choose a GPU template (not CPU).\n"
+            "  Then restart the session and re-run."
+        )
+    n = torch.cuda.device_count()
+    name = torch.cuda.get_device_name(0)
+    print(f"[pod_train] CUDA OK: {n} GPU{'s' if n != 1 else ''} ({name})")
+
+
 # ---------------------------------------------------------------------------
 # Phase 3 — token data: load if cached, stream from HF if not
 # ---------------------------------------------------------------------------
@@ -216,7 +233,10 @@ def ensure_tokens(
 
     for attempt in range(max_retries):
         try:
-            ds_kwargs = dict(split="train", streaming=True, trust_remote_code=True)
+            # Newer datasets versions reject trust_remote_code; older accept it
+            # but emit a deprecation. We drop it — Skylion007/openwebtext and
+            # HuggingFaceFW/fineweb-edu are both parquet-based and don't need it.
+            ds_kwargs = dict(split="train", streaming=True)
             if subset:
                 ds = load_dataset(dataset, name=subset, **ds_kwargs)
             else:
@@ -567,6 +587,7 @@ def main() -> int:
     try:
         ensure_deps()
         setup_paths()
+        assert_gpu_available()         # fail fast before any expensive data work
         tokens = ensure_tokens(args.dataset, args.subset, args.tokens)
         result = train(
             tokens=tokens,
