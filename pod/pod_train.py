@@ -268,7 +268,7 @@ def ensure_tokens(
 # Phase 4 — model build (fant3_50m + AEL memory)
 # ---------------------------------------------------------------------------
 
-def build_model(use_ael: bool = True):
+def build_model(use_ael: bool = True, multi_gpu: bool = False):
     import torch
     from fant3.config import fant3_50m, fant3_10m
     from fant3.model import FANT3Model
@@ -279,10 +279,25 @@ def build_model(use_ael: bool = True):
         cfg.ael_gasket_depth = 5
     cfg.use_gradient_checkpointing = True
 
-    model = FANT3Model(cfg).to("cuda", dtype=torch.bfloat16)
+    # Precision choice: bf16 on Ampere+ (sm_80+, e.g. A100, RTX 30xx/40xx, A6000).
+    # T4 / older Turing is sm_75 -- bf16 runs via fp32 emulation, much slower.
+    # We pick bf16 by default; fp16 path is a future optimization.
+    dtype = torch.bfloat16
+    cc = torch.cuda.get_device_capability()
+    if cc < (8, 0):
+        print(f"[pod_train] WARN: GPU compute capability {cc} (<sm_80). "
+              f"bf16 is emulated; throughput will be ~30-40% lower than ideal.")
+
+    model = FANT3Model(cfg).to("cuda", dtype=dtype)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[pod_train] model: fant3_50m{'+AEL' if use_ael else ''}  {n_params/1e6:.2f}M params")
-    return model, cfg
+    n_gpu = torch.cuda.device_count()
+    print(f"[pod_train] model: fant3_50m{'+AEL' if use_ael else ''}  {n_params/1e6:.2f}M params  "
+          f"({n_gpu} GPU{'s' if n_gpu != 1 else ''} visible)")
+
+    if multi_gpu and n_gpu > 1:
+        print(f"[pod_train] wrapping in DataParallel across {n_gpu} GPUs")
+        model = torch.nn.DataParallel(model)
+    return model, cfg, n_gpu
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +336,7 @@ def train(
     ckpt_dir: Path = POD_CKPT,
     use_ael: bool = True,
     resume: bool = True,
+    multi_gpu: bool = False,
 ) -> dict:
     import numpy as np
     import torch
@@ -329,7 +345,15 @@ def train(
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
 
-    model, cfg = build_model(use_ael=use_ael)
+    model, cfg, n_gpu = build_model(use_ael=use_ael, multi_gpu=multi_gpu)
+    # When DataParallel is active, batches must split evenly across GPUs.
+    # Bump physical batch to n_gpu if it was 1.
+    if n_gpu > 1 and batch < n_gpu:
+        print(f"[pod_train] bumping physical batch {batch} -> {n_gpu} so DataParallel can split")
+        batch = n_gpu
+    # Get the underlying model for state_dict ops (works for both DP-wrapped and bare).
+    bare_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+
     import bitsandbytes as bnb
     opt = bnb.optim.AdamW8bit(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -339,7 +363,7 @@ def train(
     if resume and final_ckpt.exists():
         print(f"[pod_train] resuming from {final_ckpt}")
         ckpt = torch.load(final_ckpt, weights_only=False, map_location="cuda")
-        model.load_state_dict(ckpt["model_state_dict"])
+        bare_model.load_state_dict(ckpt["model_state_dict"])
         losses = list(ckpt.get("losses", []))
         start_opt = ckpt.get("step", 0)
         print(f"  resumed step={start_opt}  last-20 loss={sum(losses[-20:])/max(20,1):.3f}")
@@ -406,7 +430,7 @@ def train(
             if (opt_step + 1) % save_every == 0:
                 atomic_save({
                     "step": opt_step + 1,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": bare_model.state_dict(),
                     "losses": losses,
                     "effective_batch": eff_batch,
                 }, final_ckpt)
@@ -415,7 +439,7 @@ def train(
         print("[pod_train] interrupted; saving emergency checkpoint")
         atomic_save({
             "step": opt_step + 1,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": bare_model.state_dict(),
             "losses": losses,
             "effective_batch": eff_batch,
         }, final_ckpt)
@@ -425,7 +449,7 @@ def train(
         try:
             atomic_save({
                 "step": opt_step + 1,
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": bare_model.state_dict(),
                 "losses": losses,
                 "effective_batch": eff_batch,
                 "crashed": True,
@@ -438,7 +462,7 @@ def train(
     # Final clean save.
     atomic_save({
         "step": opt_steps,
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": bare_model.state_dict(),
         "losses": losses,
         "effective_batch": eff_batch,
     }, final_ckpt)
@@ -486,6 +510,7 @@ def main() -> int:
     p.add_argument("--dataset",      type=str,   default="Skylion007/openwebtext")
     p.add_argument("--subset",       type=str,   default=None)
     p.add_argument("--no-ael",       action="store_true",  help="disable AEL memory module")
+    p.add_argument("--multi-gpu",    action="store_true",  help="wrap model in DataParallel across all visible GPUs (Linux + multi-GPU only)")
     p.add_argument("--no-resume",    action="store_true",  help="ignore any existing checkpoint and start fresh")
     p.add_argument("--smoke",        action="store_true",  help="tiny dress-rehearsal run (~100 opt-steps, ~2M tokens)")
     p.add_argument("--shutdown",     action="store_true",  help="run 'runpodctl stop pod $RUNPOD_POD_ID' on success")
@@ -512,6 +537,7 @@ def main() -> int:
             lr=args.lr,
             use_ael=not args.no_ael,
             resume=not args.no_resume,
+            multi_gpu=args.multi_gpu,
         )
         # Dump result summary as JSON for downstream tooling.
         with open(POD_LOGS / "last_result.json", "w") as f:
