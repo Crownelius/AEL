@@ -297,33 +297,30 @@ def ensure_tokens(
 def _should_use_multi_gpu(explicit_flag: bool) -> bool:
     """Decide whether to engage DataParallel.
 
-    - AEL_NO_MULTI_GPU env var set: force off (escape hatch).
-    - Explicit --multi-gpu flag: respect it.
-    - Otherwise: auto-enable on Linux when 2+ real CUDA devices are visible.
-      Windows is excluded because it sometimes reports phantom secondary
-      devices (e.g. tiny integrated GPUs from Optimus / display drivers)
-      that DataParallel can't actually run on.
+    KNOWN BROKEN: fant3's forward returns nested dicts that contain non-tensor
+    int fields (router_infos). nn.DataParallel.gather() crashes with
+    'TypeError: int object is not iterable' when trying to merge those across
+    replicas. Auto-multi-GPU was REMOVED -- DP requires the explicit
+    --multi-gpu flag, and even then it likely fails on fant3.
+
+    Proper multi-GPU support needs DDP (DistributedDataParallel) which doesn't
+    gather outputs across ranks. That's a future-work item.
+
+    For now: single-GPU only by default. T4 single-GPU at ~900 tok/sec is
+    enough for productive Kaggle sessions.
     """
     import torch
     if os.environ.get("AEL_NO_MULTI_GPU") == "1":
-        print("[pod_train] --no-multi-gpu set; forcing single-GPU mode")
+        return False
+    if not explicit_flag:
         return False
     n = torch.cuda.device_count()
-    if explicit_flag:
-        return n > 1
-    if sys.platform.startswith("linux") and n > 1:
-        # Sanity check: every device must have >=4 GB total memory (heuristic
-        # to filter out integrated/display GPUs).
-        for i in range(n):
-            try:
-                total_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-                if total_gb < 4.0:
-                    print(f"[pod_train] auto-multi-gpu skipped: device {i} only has {total_gb:.1f} GB")
-                    return False
-            except Exception:
-                return False
-        return True
-    return False
+    if n <= 1:
+        return False
+    print("[pod_train] WARN: --multi-gpu is explicit-only because DataParallel is "
+          "currently broken with fant3 (int gather crash). Likely to crash. "
+          "Use --no-multi-gpu or omit --multi-gpu for the safe single-GPU path.")
+    return True
 
 
 def build_model(use_ael: bool = True, multi_gpu: bool = False):
