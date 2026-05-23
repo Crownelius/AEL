@@ -184,7 +184,13 @@ def ensure_tokens(
         arr = np.load(existing)
         if len(arr) > target_tokens:
             arr = arr[:target_tokens]
-        print(f"[pod_train] tokens cache hit: {existing} ({len(arr):,} tokens, asked {target_tokens:,})")
+        actually_have = len(arr)
+        if actually_have < target_tokens:
+            shortage_pct = (1 - actually_have / target_tokens) * 100
+            print(f"[pod_train] WARN: cache file {existing.name} only has {actually_have:,} tokens, "
+                  f"asked for {target_tokens:,} ({shortage_pct:.1f}% short). Using what's there.")
+        else:
+            print(f"[pod_train] tokens cache hit: {existing} ({actually_have:,} tokens, asked {target_tokens:,})")
         return arr
 
     print(f"[pod_train] tokens cache miss; streaming {dataset}/{subset} with retries...")
@@ -268,6 +274,34 @@ def ensure_tokens(
 # Phase 4 — model build (fant3_50m + AEL memory)
 # ---------------------------------------------------------------------------
 
+def _should_use_multi_gpu(explicit_flag: bool) -> bool:
+    """Decide whether to engage DataParallel.
+
+    - Explicit --multi-gpu flag: respect it.
+    - Otherwise: auto-enable on Linux when 2+ real CUDA devices are visible.
+      Windows is excluded because it sometimes reports phantom secondary
+      devices (e.g. tiny integrated GPUs from Optimus / display drivers)
+      that DataParallel can't actually run on.
+    """
+    import torch
+    n = torch.cuda.device_count()
+    if explicit_flag:
+        return n > 1
+    if sys.platform.startswith("linux") and n > 1:
+        # Sanity check: every device must have >=4 GB total memory (heuristic
+        # to filter out integrated/display GPUs).
+        for i in range(n):
+            try:
+                total_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
+                if total_gb < 4.0:
+                    print(f"[pod_train] auto-multi-gpu skipped: device {i} only has {total_gb:.1f} GB")
+                    return False
+            except Exception:
+                return False
+        return True
+    return False
+
+
 def build_model(use_ael: bool = True, multi_gpu: bool = False):
     import torch
     from fant3.config import fant3_50m, fant3_10m
@@ -294,9 +328,15 @@ def build_model(use_ael: bool = True, multi_gpu: bool = False):
     print(f"[pod_train] model: fant3_50m{'+AEL' if use_ael else ''}  {n_params/1e6:.2f}M params  "
           f"({n_gpu} GPU{'s' if n_gpu != 1 else ''} visible)")
 
-    if multi_gpu and n_gpu > 1:
-        print(f"[pod_train] wrapping in DataParallel across {n_gpu} GPUs")
+    use_dp = _should_use_multi_gpu(multi_gpu)
+    if use_dp:
+        n_dp = torch.cuda.device_count()
+        reason = "explicit --multi-gpu" if multi_gpu else f"auto-detected Linux with {n_dp} real GPUs"
+        print(f"[pod_train] wrapping in DataParallel across {n_dp} GPUs ({reason})")
         model = torch.nn.DataParallel(model)
+        n_gpu = n_dp
+    else:
+        n_gpu = 1
     return model, cfg, n_gpu
 
 

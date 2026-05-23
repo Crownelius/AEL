@@ -19,12 +19,32 @@ That's it. Everything else (deps, data, checkpoints, logging, shutdown) is autom
 
 | Goal | Command |
 |---|---|
-| Smoke test (any box, ~3 min) | `python pod/pod_train.py --smoke --no-resume` |
-| Local dress-rehearse | `python pod/pod_train.py --steps 150 --tokens 2_000_000` |
-| Full RunPod run (auto-shutdown) | `python pod/pod_train.py --steps 25000 --tokens 200_000_000 --shutdown` |
-| Disable AEL memory (control) | add `--no-ael` |
+| Smoke test (any box, ~3 min) | `python pod/pod_train.py --smoke --no-resume --no-ael` |
+| Local dress-rehearse | `python pod/pod_train.py --steps 150 --tokens 2_000_000 --no-ael` |
+| **Pretrain (recommended: AEL memory OFF)** | `python pod/pod_train.py --steps 25000 --tokens 200_000_000 --no-ael --shutdown` |
+| Populate AEL memory after pretrain | `python pod/populate_memory.py --ckpt pod_ckpt/final.pt --out pod_ckpt/populated.pt` |
+| SFT with AEL memory live (later) | `python pod/pod_train.py --steps 5000 --tokens 10_000_000 --lr 5e-5  # (UltraChat data, after populate)` |
 | Force fresh start | add `--no-resume` |
 | Custom batch / accum / lr | `--batch 1 --accum-steps 8 --lr 3e-4` |
+| Multi-GPU (Linux auto-detects; explicit override) | add `--multi-gpu` |
+
+## Memory policy: why `--no-ael` for pretraining
+
+The AEL memory module is a *retrieval* substrate. During pure LM pretraining we
+never write into it (`store_to_memory=False`), so retrieve() returns zeros on
+every forward pass. The model wastes capacity learning to ignore the dead channel
+and pays unnecessary forward-pass overhead.
+
+**The right pipeline is:**
+
+```
+1.  Pretrain WITHOUT AEL          --no-ael          ← clean baseline, no dead channel
+2.  Populate the memory packs     populate_memory.py ← writes WordNet + facts vectors
+3.  SFT / inference WITH AEL      (default: AEL on) ← model can now use the channel
+```
+
+This separation also gives us a clean A/B: re-run inference with `--no-ael` vs
+the populated checkpoint to *measure* how much lift AEL actually provides.
 
 ## What the script handles for you
 
