@@ -254,8 +254,11 @@ def ensure_tokens(
     arr = np.array(ids[:target_tokens], dtype=np.uint16)
     safe_subset = (subset or "default").replace("/", "_")
     cache_path = cache_dir / f"{dataset.replace('/', '_')}__{safe_subset}__{target_tokens}.npy"
-    tmp = cache_path.with_suffix(".npy.tmp")
-    np.save(tmp, arr)
+    # numpy.save auto-appends ".npy" if the path doesn't already end in it.
+    # Use a file-handle to bypass that and write to the exact path we want.
+    tmp = cache_path.parent / (cache_path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        np.save(f, arr)
     tmp.replace(cache_path)
     print(f"[pod_train] cached {len(arr):,} tokens -> {cache_path}")
     return arr
