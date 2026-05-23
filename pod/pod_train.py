@@ -297,6 +297,7 @@ def ensure_tokens(
 def _should_use_multi_gpu(explicit_flag: bool) -> bool:
     """Decide whether to engage DataParallel.
 
+    - AEL_NO_MULTI_GPU env var set: force off (escape hatch).
     - Explicit --multi-gpu flag: respect it.
     - Otherwise: auto-enable on Linux when 2+ real CUDA devices are visible.
       Windows is excluded because it sometimes reports phantom secondary
@@ -304,6 +305,9 @@ def _should_use_multi_gpu(explicit_flag: bool) -> bool:
       that DataParallel can't actually run on.
     """
     import torch
+    if os.environ.get("AEL_NO_MULTI_GPU") == "1":
+        print("[pod_train] --no-multi-gpu set; forcing single-GPU mode")
+        return False
     n = torch.cuda.device_count()
     if explicit_flag:
         return n > 1
@@ -571,6 +575,7 @@ def main() -> int:
     p.add_argument("--subset",       type=str,   default=None)
     p.add_argument("--no-ael",       action="store_true",  help="disable AEL memory module")
     p.add_argument("--multi-gpu",    action="store_true",  help="wrap model in DataParallel across all visible GPUs (Linux + multi-GPU only)")
+    p.add_argument("--no-multi-gpu", action="store_true",  help="force single-GPU even if 2+ GPUs are detected (overrides auto-detection)")
     p.add_argument("--no-resume",    action="store_true",  help="ignore any existing checkpoint and start fresh")
     p.add_argument("--smoke",        action="store_true",  help="tiny dress-rehearsal run (~100 opt-steps, ~2M tokens)")
     p.add_argument("--shutdown",     action="store_true",  help="run 'runpodctl stop pod $RUNPOD_POD_ID' on success")
@@ -580,6 +585,10 @@ def main() -> int:
         args.steps = 100
         args.tokens = 2_000_000
         print("[pod_train] SMOKE mode: 100 opt-steps, 2M tokens")
+
+    # --no-multi-gpu env hand-off so the deep build_model() auto-detect honors it.
+    if args.no_multi_gpu:
+        os.environ["AEL_NO_MULTI_GPU"] = "1"
 
     print(f"[pod_train] argv: {sys.argv}")
     print(f"[pod_train] args: {vars(args)}")
