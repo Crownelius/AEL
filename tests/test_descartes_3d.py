@@ -112,6 +112,44 @@ def test_tangent_axis_orthogonal():
     assert abs(minkowski_inner(w, u.u)) < 1e-6
 
 
+def test_minkowski_negative_definite_on_tangent_space():
+    """The induced metric on T_u is -<.,.>_M, i.e. the Minkowski form is
+    negative-definite there. Guards the sign convention the cone relies on."""
+    rng = np.random.default_rng(7)
+    for _ in range(200):
+        u = to_hyperboloid(np.abs(rng.normal(size=4)) + 0.1)
+        w = tangent_unit_axis(u, rng.normal(size=4))
+        # tangent_unit_axis normalises in g = -<w,w>_M, so <w,w>_M must be <= 0.
+        assert minkowski_inner(w, w) <= 1e-9, f"<w,w>_M = {minkowski_inner(w, w)} > 0 on tangent space"
+
+
+def test_tangent_axis_is_g_unit():
+    """tangent_unit_axis returns a vector of unit length in the induced metric
+    g(w,w) = -<w,w>_M."""
+    rng = np.random.default_rng(8)
+    u = to_hyperboloid(np.abs(rng.normal(size=4)) + 0.1)
+    w = tangent_unit_axis(u, rng.normal(size=4))
+    g = -minkowski_inner(w, w)
+    assert abs(g - 1.0) < 1e-6, f"g-norm^2 = {g}, expected 1"
+
+
+def test_cone3d_directional_selectivity():
+    """A Cone3D pointing toward a point must score it higher than a point in
+    the opposite direction. Regression test for the abs(cos) bug that made
+    forward and backward indistinguishable."""
+    from src.ael.cone_3d import Cone3D
+    from src.ael.descartes_3d import hyper_log
+
+    apex = to_hyperboloid(np.array([3.0, 1.0, 1.0, 1.0]))
+    p_fwd = to_hyperboloid(np.array([3.0, 1.2, 1.0, 1.0]))
+    p_bwd = to_hyperboloid(np.array([3.0, 0.8, 1.0, 1.0]))
+    axis = hyper_log(apex, p_fwd)
+    cone = Cone3D(apex=apex, axis=axis, aperture=0.5, sigma=5.0)
+    w_fwd = cone.weight(p_fwd)
+    w_bwd = cone.weight(p_bwd)
+    assert w_fwd > w_bwd + 0.1, f"forward {w_fwd:.4f} not clearly > backward {w_bwd:.4f}"
+
+
 if __name__ == "__main__":
     tests = [
         ("root quadruple", test_root_quadruple_is_descartes),
@@ -125,6 +163,9 @@ if __name__ == "__main__":
         ("hyper distance symmetric", test_hyper_distance_symmetric),
         ("log in tangent space", test_log_lies_in_tangent_space),
         ("tangent axis orthogonal", test_tangent_axis_orthogonal),
+        ("minkowski neg-definite on T_u", test_minkowski_negative_definite_on_tangent_space),
+        ("tangent axis is g-unit", test_tangent_axis_is_g_unit),
+        ("cone3d directional selectivity", test_cone3d_directional_selectivity),
     ]
     for name, fn in tests:
         try:

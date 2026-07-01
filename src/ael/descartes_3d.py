@@ -122,18 +122,31 @@ class HyperboloidPoint:
 
 
 def to_hyperboloid(b: np.ndarray, eps: float = 1e-9) -> HyperboloidPoint:
-    """Rescale a generic timelike 4-vector so <u, u>_M = +1.
+    """Rescale a timelike 4-vector so <u, u>_M = +1 (project onto H^3).
 
-    If b is lightlike or close to it (a Descartes quadruple), nudge it
-    slightly into the timelike interior by adding eps * (1,1,1,1).
+    WARNING — NOT the right model for gasket embedding. A Descartes quadruple
+    is LIGHTLIKE (<b, b>_M = -F(b) = 0), so it does not lie on the timelike
+    hyperboloid. The eps-nudge below forces it on by inflating the (1,1,1,1)
+    component, which collapses every gasket circle toward the same apex — this
+    is exactly why the Phase-A hyperboloid embedding failed in experiment 06.
+    For embedding gasket circles use the upper-half-space model in `ael.uhs`
+    (which gave the working Phase-A results in experiment 07). This function is
+    kept only for genuinely timelike (off-shell) inputs and that comparison.
     """
     b = np.asarray(b, dtype=float)
     if b.sum() <= 0:
         b = -b  # pick the upper sheet
     n2 = minkowski_norm_sq(b)
-    if n2 <= eps:
-        b = b + eps * np.ones_like(b)
+    # A spacelike or lightlike input (n2 <= 0) has no place on the timelike
+    # hyperboloid. Nudge toward the timelike apex (1,1,1,1) until strictly
+    # timelike -- Q(b + t*ones) -> +inf as t grows, so this always terminates.
+    # (Adding a single fixed eps did NOT guarantee timelike and could leave
+    # n2 < 0, crashing math.sqrt.)
+    t = max(eps, 1e-9)
+    while n2 <= eps:
+        b = b + t * np.ones(4)
         n2 = minkowski_norm_sq(b)
+        t *= 10.0
     return HyperboloidPoint(u=b / math.sqrt(float(n2)))
 
 
@@ -169,23 +182,22 @@ def tangent_unit_axis(u: HyperboloidPoint, axis_unnormalised: np.ndarray) -> np.
     """Project an ambient 4-vector to the tangent space at u and normalise.
 
     Tangent space at u: { w in R^4 : <w, u>_M = 0 }.
-    The tangent metric is positive-definite (the induced Riemannian metric
-    on H), so we can use Euclidean-style L2 norm on the projected vector to
-    define unit axes for cone attention.
+
+    The Minkowski form is signature (1, 3) with the single positive
+    eigendirection along (1,1,1,1). At a timelike unit vector u that positive
+    direction is spanned by u itself, so on the orthogonal complement T_u the
+    form is NEGATIVE-definite. The induced Riemannian metric on the hyperboloid
+    is therefore g(w, w) = -<w, w>_M >= 0, and we normalise in g (verified
+    empirically: 980/1000 random tangent vectors have <w,w>_M < 0, none > 0).
     """
     w = np.asarray(axis_unnormalised, dtype=float)
-    # Remove the u-component (in Minkowski metric).
+    # Remove the u-component (in the Minkowski metric) so <w, u>_M = 0.
     w = w - minkowski_inner(w, u.u) * u.u
-    # Tangent norm = sqrt(<w, w>_M) when w is spacelike; for tangent vectors
-    # at a timelike u, the induced metric is positive-definite, so use the
-    # standard formula <w, w>_M = (sum w)^2 - 2 sum(w^2) which is >= 0 in
-    # the tangent space.
-    n2 = float(minkowski_inner(w, w))
-    # In the tangent space at a unit timelike vector, the induced norm is
-    # actually -<w,w>_M (we're using -F = <,>_M convention).
-    # Empirically: tangent vectors have <w,w>_M < 0 in our (1,3) convention.
-    # Use absolute value for safety.
-    n = math.sqrt(abs(n2))
+    # Induced metric g(w, w) = -<w, w>_M. Clamp at 0 rather than abs() so a
+    # genuinely spacelike (positive <w,w>_M) input surfaces as ~0 instead of
+    # being silently accepted.
+    g = -float(minkowski_inner(w, w))
+    n = math.sqrt(max(g, 0.0))
     if n < 1e-12:
         return w
     return w / n

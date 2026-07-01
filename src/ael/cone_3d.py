@@ -54,21 +54,22 @@ class Cone3D:
         d = hyper_dist(self.apex, v)
         w_rad = math.exp(-(d / max(self.sigma, 1e-9)) ** 2)
 
-        # Direction term: angle between log_u(v) and axis in tangent space.
+        # Direction term: angle between log_u(v) and axis in the tangent space.
+        # The Minkowski form is NEGATIVE-definite on T_u (the single positive
+        # eigendirection is spanned by u itself), so the induced Riemannian
+        # metric is g(a, b) = -<a, b>_M.  Normalise and take the cosine in g.
         log_v = hyper_log(self.apex, v)
-        n_log = float(math.sqrt(abs(minkowski_inner(log_v, log_v))))
+        g_log = -float(minkowski_inner(log_v, log_v))  # >= 0 on the tangent space
+        n_log = math.sqrt(max(g_log, 0.0))
         if n_log < 1e-12:
             return w_rad  # v == apex (or almost)
         log_unit = log_v / n_log
-        # Tangent-space inner product. At a timelike unit vector u, the
-        # restriction of the Minkowski form to T_u is positive-definite,
-        # but with a sign flip in our (1,3) convention -- use absolute value.
-        ip = float(minkowski_inner(log_unit, self.axis))
-        # log_unit and axis are both tangent and unit-norm in the tangent
-        # metric. Their inner product in MInkowski may carry a sign from
-        # our convention; use |ip| clamped.
-        ip = max(-1.0, min(1.0, abs(ip)))
-        theta = math.acos(ip)
+        # cos(theta) = g(log_unit, axis) = -<log_unit, axis>_M.  Do NOT take the
+        # absolute value: a cone pointing away from v must score lower than one
+        # pointing toward it, which |cos| would destroy.
+        cos_theta = -float(minkowski_inner(log_unit, self.axis))
+        cos_theta = max(-1.0, min(1.0, cos_theta))
+        theta = math.acos(cos_theta)
         w_dir = math.exp(-(theta / max(self.aperture, 1e-9)) ** 2)
 
         return w_dir * w_rad
